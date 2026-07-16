@@ -386,6 +386,7 @@ struct PendingTrack {
     external_audio_url: String,
     external_sub_url: String,
     defer_audio_to_mpv: bool,
+    defer_subtitle_to_mpv: bool,
     valid: bool,
 }
 
@@ -400,6 +401,7 @@ fn pending_slot() -> &'static Mutex<PendingTrack> {
             external_audio_url: String::new(),
             external_sub_url: String::new(),
             defer_audio_to_mpv: false,
+            defer_subtitle_to_mpv: false,
             valid: false,
         })
     })
@@ -421,6 +423,10 @@ fn should_defer_audio_to_mpv(
             || (is_infinite_stream && audio_track == TRACK_DISABLE))
 }
 
+fn should_defer_subtitle_to_mpv(subtitle_track: i64, has_external_subtitle: bool) -> bool {
+    !has_external_subtitle && subtitle_track == TRACK_AUTO
+}
+
 pub unsafe fn jfn_mpv_load_file(path: *const c_char, opts: *const JfnMpvLoadOptions) {
     let Some(path_c) = (unsafe { cstr(path) }) else {
         return;
@@ -433,6 +439,8 @@ pub unsafe fn jfn_mpv_load_file(path: *const c_char, opts: *const JfnMpvLoadOpti
     let ext_sub = unsafe { cstr_to_string(o.external_sub_url) };
     let defer_audio =
         should_defer_audio_to_mpv(o.is_infinite_stream, o.audio_track, !ext_audio.is_empty());
+    let defer_subtitle =
+        should_defer_subtitle_to_mpv(o.sub_track, !ext_sub.is_empty());
 
     // Track selection is owned by Jellyfin. With track-auto-selection=no,
     // mpv silently drops aid/vid/sid in loadfile options (loadfile.c
@@ -449,14 +457,15 @@ pub unsafe fn jfn_mpv_load_file(path: *const c_char, opts: *const JfnMpvLoadOpti
         s.external_audio_url = ext_audio;
         s.external_sub_url = ext_sub;
         s.defer_audio_to_mpv = defer_audio;
+        s.defer_subtitle_to_mpv = defer_subtitle;
         s.valid = true;
     }
 
     let mut opts_str = format!("start={},pause=yes", o.start_secs);
-    if defer_audio {
-        // Per-file enable so mpv's demuxer picks the format-correct
-        // audio track (HLS DEFAULT=YES, MPEG-TS first PMT, etc.). We
-        // explicitly write `sid=no` after FILE_LOADED to keep subs off.
+    if defer_audio || defer_subtitle {
+        // Per-file enable so mpv's demuxer can pick tracks whose metadata
+        // Jellyfin did not provide. Known or explicitly disabled tracks are
+        // still applied after FILE_LOADED below.
         opts_str.push_str(",track-auto-selection=yes");
     }
     let opts_c = CString::new(opts_str).unwrap_or_default();
@@ -476,12 +485,14 @@ pub fn jfn_mpv_apply_pending_track_selection_and_play() {
             std::mem::take(&mut s.external_audio_url),
             std::mem::take(&mut s.external_sub_url),
             s.defer_audio_to_mpv,
+            s.defer_subtitle_to_mpv,
         );
         s.valid = false;
         s.defer_audio_to_mpv = false;
+        s.defer_subtitle_to_mpv = false;
         snap
     };
-    let (vid, aid, sid, ext_audio, ext_sub, defer_audio) = snapshot;
+    let (vid, aid, sid, ext_audio, ext_sub, defer_audio, defer_subtitle) = snapshot;
 
     let vid_s = track_to_mpv_str(vid);
     unsafe { set_str(c"vid", &vid_s) };
@@ -492,8 +503,10 @@ pub fn jfn_mpv_apply_pending_track_selection_and_play() {
         let aid_s = track_to_mpv_str(aid);
         unsafe { set_str(c"aid", &aid_s) };
     }
-    let sid_s = track_to_mpv_str(sid);
-    unsafe { set_str(c"sid", &sid_s) };
+    if !defer_subtitle {
+        let sid_s = track_to_mpv_str(sid);
+        unsafe { set_str(c"sid", &sid_s) };
+    }
     if !ext_audio.is_empty() {
         match CString::new(ext_audio) {
             Ok(u) => cmd(&[c"audio-add", &u, c"select"]),
@@ -580,7 +593,8 @@ pub unsafe fn jfn_mpv_set_background_color_hex(hex: *const c_char) {
 #[cfg(test)]
 mod tests {
     use super::{
-        should_defer_audio_to_mpv, track_to_mpv_str, TRACK_AUTO, TRACK_DISABLE,
+        should_defer_audio_to_mpv, should_defer_subtitle_to_mpv, track_to_mpv_str,
+        TRACK_AUTO, TRACK_DISABLE,
     };
 
     #[test]
@@ -606,5 +620,21 @@ mod tests {
     fn external_audio_never_enables_container_auto_selection() {
         assert!(!should_defer_audio_to_mpv(false, TRACK_AUTO, true));
         assert!(!should_defer_audio_to_mpv(true, TRACK_DISABLE, true));
+    }
+
+    #[test]
+    fn unknown_subtitle_metadata_delegates_selection_to_mpv() {
+        assert!(should_defer_subtitle_to_mpv(TRACK_AUTO, false));
+    }
+
+    #[test]
+    fn explicit_subtitle_choice_remains_authoritative() {
+        assert!(!should_defer_subtitle_to_mpv(TRACK_DISABLE, false));
+        assert!(!should_defer_subtitle_to_mpv(1, false));
+    }
+
+    #[test]
+    fn external_subtitle_suppresses_container_auto_selection() {
+        assert!(!should_defer_subtitle_to_mpv(TRACK_AUTO, true));
     }
 }
