@@ -156,9 +156,20 @@
                 }
             }
 
-            let subParam = MpvPlayerBase.TRACK_DISABLE;
+            // As with audio, an empty MediaStreams list means the source was
+            // not probed. Let mpv select the container's default subtitle in
+            // that case instead of treating the missing metadata as an
+            // explicit request to disable subtitles.
+            const hasUsableSubtitleMetadata = streams.some(s =>
+                s.Type === 'Subtitle' && Number.isInteger(s.Index) && s.Index >= 0);
+            if (!hasUsableSubtitleMetadata && options.playMethod !== 'Transcode') {
+                console.info('[Media] [Video] subtitle metadata unavailable; delegating selection to mpv');
+            }
+            let subParam = !hasUsableSubtitleMetadata && options.playMethod !== 'Transcode'
+                ? MpvPlayerBase.TRACK_AUTO
+                : MpvPlayerBase.TRACK_DISABLE;
             let externalSubUrl = null;
-            if (defaultSubIdx >= 0) {
+            if (hasUsableSubtitleMetadata && defaultSubIdx >= 0) {
                 const subStream = getStreamByIndex(streams, defaultSubIdx);
                 if (subStream && subStream.DeliveryMethod === 'External' && subStream.DeliveryUrl) {
                     externalSubUrl = subStream.DeliveryUrl;
