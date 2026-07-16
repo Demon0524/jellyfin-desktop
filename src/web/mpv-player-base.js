@@ -212,6 +212,7 @@
     }
 
     // mpv track selection (1-based track indices)
+    MpvPlayerBase.TRACK_AUTO = -1;   // metadata unavailable; let mpv choose
     MpvPlayerBase.TRACK_DISABLE = 0;  // disable track (sid=0, aid=0)
 
     window.MpvPlayerBase = MpvPlayerBase;

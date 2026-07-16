@@ -321,13 +321,18 @@ pub fn jfn_mpv_set_start_position(s: f64) {
     unsafe { set_double(c"start", s) };
 }
 
-/// Track id sentinel: 0 = disabled. >=1 = explicit mpv track id.
+/// Track id sentinels: -1 = enable per-file mpv auto-selection, 0 = disabled,
+/// >=1 = explicit mpv track id.
 /// Mpv's auto-track-selection is globally disabled (boot applies
-/// `track-auto-selection=no`); jellyfin-web is the authority.
+/// `track-auto-selection=no`); jellyfin-web is the authority whenever it
+/// supplied usable stream metadata.
+const TRACK_AUTO: i64 = -1;
 const TRACK_DISABLE: i64 = 0;
 
 fn track_to_mpv_str(id: i64) -> CString {
-    if id == TRACK_DISABLE {
+    if id == TRACK_AUTO {
+        CString::new("auto").unwrap_or_default()
+    } else if id == TRACK_DISABLE {
         CString::new("no").unwrap_or_default()
     } else {
         CString::new(id.to_string()).unwrap_or_default()
@@ -406,6 +411,16 @@ unsafe fn cstr_to_string(p: *const c_char) -> String {
         .unwrap_or_default()
 }
 
+fn should_defer_audio_to_mpv(
+    is_infinite_stream: bool,
+    audio_track: i64,
+    has_external_audio: bool,
+) -> bool {
+    !has_external_audio
+        && (audio_track == TRACK_AUTO
+            || (is_infinite_stream && audio_track == TRACK_DISABLE))
+}
+
 pub unsafe fn jfn_mpv_load_file(path: *const c_char, opts: *const JfnMpvLoadOptions) {
     let Some(path_c) = (unsafe { cstr(path) }) else {
         return;
@@ -417,7 +432,7 @@ pub unsafe fn jfn_mpv_load_file(path: *const c_char, opts: *const JfnMpvLoadOpti
     let ext_audio = unsafe { cstr_to_string(o.external_audio_url) };
     let ext_sub = unsafe { cstr_to_string(o.external_sub_url) };
     let defer_audio =
-        o.is_infinite_stream && o.audio_track == TRACK_DISABLE && ext_audio.is_empty();
+        should_defer_audio_to_mpv(o.is_infinite_stream, o.audio_track, !ext_audio.is_empty());
 
     // Track selection is owned by Jellyfin. With track-auto-selection=no,
     // mpv silently drops aid/vid/sid in loadfile options (loadfile.c
@@ -471,9 +486,9 @@ pub fn jfn_mpv_apply_pending_track_selection_and_play() {
     let vid_s = track_to_mpv_str(vid);
     unsafe { set_str(c"vid", &vid_s) };
     if !defer_audio {
-        // Normal path: jellyfin-web is authoritative. Skipped only for
-        // the unprobed-live case (track-auto-selection=yes was set
-        // per-file in load_file so mpv's demuxer already picked).
+        // Normal path: jellyfin-web is authoritative. Skipped only when
+        // metadata was unavailable (including unprobed live streams), where
+        // track-auto-selection=yes was set per-file so mpv already picked.
         let aid_s = track_to_mpv_str(aid);
         unsafe { set_str(c"aid", &aid_s) };
     }
@@ -560,4 +575,36 @@ pub unsafe fn jfn_mpv_set_background_color_hex(hex: *const c_char) {
         return;
     };
     unsafe { set_str(c"background-color", h) };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        should_defer_audio_to_mpv, track_to_mpv_str, TRACK_AUTO, TRACK_DISABLE,
+    };
+
+    #[test]
+    fn unknown_audio_metadata_delegates_selection_to_mpv() {
+        assert!(should_defer_audio_to_mpv(false, TRACK_AUTO, false));
+        assert_eq!(track_to_mpv_str(TRACK_AUTO).to_bytes(), b"auto");
+    }
+
+    #[test]
+    fn legacy_unprobed_live_stream_still_delegates_selection() {
+        assert!(should_defer_audio_to_mpv(true, TRACK_DISABLE, false));
+    }
+
+    #[test]
+    fn explicit_track_or_disable_remains_authoritative() {
+        assert!(!should_defer_audio_to_mpv(false, TRACK_DISABLE, false));
+        assert!(!should_defer_audio_to_mpv(false, 1, false));
+        assert_eq!(track_to_mpv_str(TRACK_DISABLE).to_bytes(), b"no");
+        assert_eq!(track_to_mpv_str(2).to_bytes(), b"2");
+    }
+
+    #[test]
+    fn external_audio_never_enables_container_auto_selection() {
+        assert!(!should_defer_audio_to_mpv(false, TRACK_AUTO, true));
+        assert!(!should_defer_audio_to_mpv(true, TRACK_DISABLE, true));
+    }
 }

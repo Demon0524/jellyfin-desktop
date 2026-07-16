@@ -126,11 +126,19 @@
                 if (fallback) defaultAudioIdx = fallback.Index;
             }
 
-            // Mirror jellyfin-web's UI selection exactly: feed mpv the relative
-            // index for DefaultAudioStreamIndex, or TRACK_DISABLE if none is selected.
-            // mpv auto track selection is completely disabled as it conflicts with
-            // the fact that jellyfin-web is ultimately responsible for that.
-            let audioParam = MpvPlayerBase.TRACK_DISABLE;
+            // Mirror jellyfin-web's selection when it supplied usable audio
+            // metadata. STRM and other unprobed sources can have no audio
+            // MediaStreams at all; that means "unknown", not "audio disabled".
+            // Delegate only that case to mpv so it can select the container's
+            // default audio track after probing the real media.
+            const hasUsableAudioMetadata = streams.some(s =>
+                s.Type === 'Audio' && Number.isInteger(s.Index) && s.Index >= 0);
+            if (!hasUsableAudioMetadata && options.playMethod !== 'Transcode') {
+                console.info('[Media] [Video] audio metadata unavailable; delegating selection to mpv');
+            }
+            let audioParam = hasUsableAudioMetadata
+                ? MpvPlayerBase.TRACK_DISABLE
+                : MpvPlayerBase.TRACK_AUTO;
             let externalAudioUrl = null;
             if (options.playMethod === 'Transcode') {
                 // Server bakes the chosen audio into the transcoded output
